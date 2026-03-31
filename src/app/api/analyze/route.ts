@@ -217,6 +217,10 @@ One paragraph: how has the overall narrative evolved from the earliest to the mo
 
 // ── Streaming helper ──────────────────────────────────────────────────────────
 
+// Retry with exponential backoff on overloaded errors, fall back to Sonnet
+const MODELS = ["claude-opus-4-6", "claude-sonnet-4-6"] as const;
+const MAX_RETRIES = 4;
+
 async function streamSection(
   section: TabName,
   prompt: string,
@@ -224,23 +228,50 @@ async function streamSection(
 ): Promise<void> {
   send({ type: "section_start", section });
 
-  const claudeStream = await anthropic.messages.stream({
-    model: "claude-opus-4-6",
-    max_tokens: 3000,
-    thinking: { type: "adaptive" },
-    messages: [{ role: "user", content: prompt }],
-  });
+  let lastError: unknown;
 
-  for await (const chunk of claudeStream) {
-    if (
-      chunk.type === "content_block_delta" &&
-      chunk.delta.type === "text_delta"
-    ) {
-      send({ type: "text", content: chunk.delta.text, section });
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    // After 2 failed attempts on Opus, switch to Sonnet
+    const model = attempt >= 2 ? MODELS[1] : MODELS[0];
+
+    try {
+      const claudeStream = await anthropic.messages.stream({
+        model,
+        max_tokens: 3000,
+        thinking: { type: "adaptive" },
+        messages: [{ role: "user", content: prompt }],
+      });
+
+      for await (const chunk of claudeStream) {
+        if (
+          chunk.type === "content_block_delta" &&
+          chunk.delta.type === "text_delta"
+        ) {
+          send({ type: "text", content: chunk.delta.text, section });
+        }
+      }
+
+      send({ type: "section_done", section });
+      return; // success
+    } catch (err) {
+      lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const isOverloaded =
+        msg.includes("overloaded") || msg.includes("529") || msg.includes("529");
+
+      if (!isOverloaded) throw err; // non-retryable error
+
+      // Exponential backoff: 2s, 4s, 8s, 16s
+      const delay = 2000 * Math.pow(2, attempt);
+      send({
+        type: "status",
+        message: `API busy — retrying in ${delay / 1000}s (${attempt + 1}/${MAX_RETRIES})…`,
+      });
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
 
-  send({ type: "section_done", section });
+  throw lastError;
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────
