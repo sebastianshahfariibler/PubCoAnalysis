@@ -18,12 +18,24 @@ const anthropic = new Anthropic({
 
 type CompanyMeta = CompanyInfo & { sic?: string; sicDescription?: string };
 
+const CONFIDENCE_BLOCK = `
+
+---
+
+Finally, end your response with this block (always last):
+
+### CONFIDENCE ASSESSMENT
+- **Score:** [High / Medium / Low]
+- **Basis:** [One sentence — reference the number of periods, source types (transcript vs press release vs 10-Q), and any notable data gaps]
+- **Watch-outs:** [2–3 specific claims in your analysis a reader should independently verify]`;
+
 // ── Prompt builders ───────────────────────────────────────────────────────────
 
 function buildEarningsPrompt(
   company: CompanyMeta,
   transcripts: Awaited<ReturnType<typeof getTranscripts>>,
-  releases: Awaited<ReturnType<typeof getEarningsReleases>>
+  releases: Awaited<ReturnType<typeof getEarningsReleases>>,
+  tabContext?: { financials?: string }
 ): string {
   // Prefer transcripts, fall back to earnings releases
   const docs = transcripts.length > 0 ? transcripts : releases;
@@ -39,10 +51,14 @@ function buildEarningsPrompt(
     )
     .join("\n---\n\n");
 
+  const financialContext = tabContext?.financials
+    ? `\n\n---\n\n## FINANCIAL CONTEXT (from Financial Filing tab — use only to cross-reference, do not repeat)\n\n${tabContext.financials.slice(0, 2000)}\n\n---\n`
+    : "";
+
   return `You are a behavioral finance analyst. Analyze these earnings call documents for ${company.name} (${company.ticker ?? "N/A"}).
 
 **Style rules:**
-- 600–750 words maximum
+- 600–750 words maximum (excluding the confidence block)
 - Spell out every acronym in full the first time it appears, e.g. "Earnings Per Share (EPS)"
 - No filler phrases ("it is worth noting", "in conclusion", etc.)
 - Only reference data that actually appears in the documents below — do not speculate
@@ -50,7 +66,7 @@ function buildEarningsPrompt(
 
 ## COMPANY: ${company.name} (${company.ticker ?? "N/A"})
 Industry: ${company.sicDescription ?? "N/A"} (Standard Industrial Classification (SIC): ${company.sic ?? "N/A"})
-
+${financialContext}
 ---
 
 ## EARNINGS DOCUMENTS (${docs.length} periods)
@@ -71,7 +87,7 @@ Bullet list of notable linguistic patterns with direct quotes. For each marker, 
 3–5 bullets: What is management revealing (or concealing) through word choice, topic emphasis, and framing?
 
 ### 4. LANGUAGE EVOLUTION
-How has communication style shifted across periods? Topics that appeared then disappeared? New vocabulary introduced? What does the trajectory suggest?`;
+How has communication style shifted across periods? Topics that appeared then disappeared? New vocabulary introduced? What does the trajectory suggest?${CONFIDENCE_BLOCK}`;
 }
 
 function buildFinancialsPrompt(
@@ -139,13 +155,14 @@ If no comparable periods: "Insufficient data for comparison."
 Cash trends, debt levels, buybacks, dividends, and investment signals from the data.
 
 ### 5. KEY RISK FLAGS
-2–3 specific quantitative concerns from the data only.`;
+2–3 specific quantitative concerns from the data only.${CONFIDENCE_BLOCK}`;
 }
 
 function buildThemesPrompt(
   company: CompanyMeta,
   transcripts: Awaited<ReturnType<typeof getTranscripts>>,
-  releases: Awaited<ReturnType<typeof getEarningsReleases>>
+  releases: Awaited<ReturnType<typeof getEarningsReleases>>,
+  tabContext?: { earnings?: string }
 ): string {
   // Combine transcripts and releases, de-duplicate by date, prefer transcripts
   const allDocs = [...transcripts];
@@ -168,10 +185,14 @@ function buildThemesPrompt(
 
   const periodLabels = docs.map((d) => d.period).join(" | ");
 
+  const earningsContext = tabContext?.earnings
+    ? `\n\n---\n\n## EARNINGS CALLS ANALYSIS (already completed — use to cross-reference themes, do not repeat verbatim)\n\n${tabContext.earnings.slice(0, 3000)}\n\n---\n`
+    : "";
+
   return `You are a strategic communications analyst. Identify and track key management narrative themes across earnings periods for ${company.name} (${company.ticker ?? "N/A"}).
 
 **Style rules:**
-- 400–550 words maximum
+- 400–550 words maximum (excluding the confidence block)
 - Use tables where helpful — they are strongly preferred for the theme inventory
 - No filler phrases
 - Only reference themes from the provided documents
@@ -179,7 +200,7 @@ function buildThemesPrompt(
 
 ## COMPANY: ${company.name} (${company.ticker ?? "N/A"})
 Periods covered (newest first): ${periodLabels}
-
+${earningsContext}
 ---
 
 ## EARNINGS DOCUMENTS (${docs.length} periods)
@@ -212,7 +233,7 @@ Topics prominent early that have since diminished or disappeared. What is manage
 Core narratives appearing consistently across all periods — management's stable long-term story.
 
 ### 5. STRATEGIC NARRATIVE SHIFT
-One paragraph: how has the overall narrative evolved from the earliest to the most recent period?`;
+One paragraph: how has the overall narrative evolved from the earliest to the most recent period?${CONFIDENCE_BLOCK}`;
 }
 
 // ── Streaming helper ──────────────────────────────────────────────────────────
@@ -277,10 +298,15 @@ async function streamSection(
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
-  const body = (await request.json()) as CompanyInfo & { quarters?: number; section?: TabName };
+  const body = (await request.json()) as CompanyInfo & {
+    quarters?: number;
+    section?: TabName;
+    tabContext?: { earnings?: string; financials?: string; themes?: string };
+  };
   const { cik, name, ticker } = body;
   const quarters = Math.min(Math.max(body.quarters ?? 4, 2), 8);
-  const sectionOnly = body.section ?? null; // if set, only run that one section
+  const sectionOnly = body.section ?? null;
+  const tabContext = body.tabContext ?? {};
 
   if (!cik || !name) {
     return new Response(
@@ -321,7 +347,7 @@ export async function POST(request: NextRequest) {
           metaResult.status === "fulfilled" ? metaResult.value : null;
 
         const financialTable = financials
-          ? formatFinancialSummary(financials)
+          ? formatFinancialSummary(financials, quarters)
           : "Financial data not available for this company.";
 
         const company: CompanyMeta = {
@@ -357,9 +383,9 @@ export async function POST(request: NextRequest) {
           message: `Found ${transcripts.length} transcript(s), ${releases.length} filing(s). Running analysis…`,
         });
 
-        const earningsPrompt = buildEarningsPrompt(company, transcripts, releases);
+        const earningsPrompt = buildEarningsPrompt(company, transcripts, releases, tabContext);
         const financialsPrompt = buildFinancialsPrompt(company, releases, financialTable, hasFinancialData);
-        const themesPrompt = buildThemesPrompt(company, transcripts, releases);
+        const themesPrompt = buildThemesPrompt(company, transcripts, releases, tabContext);
 
         if (sectionOnly === "earnings") {
           send({ type: "status", message: "Refreshing earnings calls analysis…" });

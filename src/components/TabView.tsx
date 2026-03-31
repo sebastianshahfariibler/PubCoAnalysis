@@ -291,12 +291,23 @@ function renderMarkdown(text: string, isStreaming: boolean): React.ReactNode[] {
       continue;
     }
     if (line.startsWith("### ")) {
+      const title = line.slice(4);
+      const isConfidence = title.trim().toUpperCase().startsWith("CONFIDENCE");
       nodes.push(
         <h3
           key={key++}
-          style={{ fontSize: 14, fontWeight: 600, color: "#d0d0e8", margin: "18px 0 6px" }}
+          style={{
+            fontSize: 13,
+            fontWeight: 700,
+            color: isConfidence ? "#a0c4ff" : "#d0d0e8",
+            margin: isConfidence ? "24px 0 6px" : "18px 0 6px",
+            paddingTop: isConfidence ? 14 : 0,
+            borderTop: isConfidence ? "1px dashed #2a2a3e" : "none",
+            letterSpacing: isConfidence ? "0.06em" : "normal",
+            textTransform: isConfidence ? "uppercase" : "none",
+          }}
         >
-          {inlineFormat(line.slice(4))}
+          {isConfidence ? "⬡ " : ""}{inlineFormat(title)}
         </h3>
       );
       continue;
@@ -631,7 +642,7 @@ export default function TabView({
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...company, quarters, section }),
+        body: JSON.stringify({ ...company, quarters, section, tabContext: tabs }),
       });
       if (!response.body) throw new Error("No stream");
 

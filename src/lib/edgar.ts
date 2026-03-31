@@ -175,8 +175,9 @@ async function collectFilings(
     const accNo = recent.accessionNumber[i];
     const primaryDoc = recent.primaryDocument[i];
     if (!primaryDoc) continue;
-    // Skip duplicates by accession number
-    if (results.some((r) => r.date === recent.filingDate[i] && r.form === form)) continue;
+    // Skip if we already have a document for this fiscal period (one per quarter)
+    const period = recent.reportDate[i] ?? recent.filingDate[i];
+    if (results.some((r) => r.period === period)) continue;
     try {
       const text = await fetchDocument(cik, accNo, primaryDoc);
       if (text.length > 200) {
@@ -404,8 +405,8 @@ function fmt(val: number): string {
   return `$${val.toFixed(2)}`;
 }
 
-export function formatFinancialSummary(fs: FinancialSummary): string {
-  const periods = fs.revenue.map((r) => r.end).slice(0, 6);
+export function formatFinancialSummary(fs: FinancialSummary, maxPeriods = 6): string {
+  const periods = fs.revenue.map((r) => r.end).slice(0, maxPeriods);
   if (periods.length === 0) return "Financial data not available.";
 
   const getVal = (arr: FinancialPeriod[], end: string) =>
