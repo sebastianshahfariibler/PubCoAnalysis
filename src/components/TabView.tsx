@@ -438,54 +438,15 @@ function TabContent({
     : completedText;
 
   const showCursor = isRefreshing || isMainStreaming;
+  // Button is disabled only while this specific section is actively streaming/refreshing
+  const refreshDisabled = isMainStreaming || isRefreshing;
 
-  // Not started yet (main analysis pending or no data)
-  if (!displayText && !isMainStreaming && !isRefreshing) {
-    return (
-      <div
-        style={{
-          background: "#14141c",
-          border: "1px solid #2a2a38",
-          borderRadius: 12,
-          padding: "40px 20px",
-          textAlign: "center",
-        }}
-      >
-        {isStreaming ? (
-          <div style={{ color: "#404058", fontSize: 13 }}>
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="#2a2a48"
-              strokeWidth="2"
-              style={{ display: "block", margin: "0 auto 10px" }}
-            >
-              <circle cx="12" cy="12" r="10" />
-              <path d="M12 6v6l4 2" />
-            </svg>
-            Analysis queued — will appear shortly
-          </div>
-        ) : (
-          <div style={{ color: "#404058", fontSize: 13 }}>No data available</div>
-        )}
-      </div>
-    );
-  }
-
-  // Loading spinner while section starts streaming
+  // Decide what to render in the content area
+  let contentBody: React.ReactNode;
   if ((isMainStreaming || isRefreshing) && !displayText) {
-    return (
-      <div
-        style={{
-          background: "#14141c",
-          border: "1px solid #2a2a38",
-          borderRadius: 10,
-          padding: "20px",
-          textAlign: "center",
-        }}
-      >
+    // Waiting for first tokens
+    contentBody = (
+      <div style={{ padding: "20px 0", textAlign: "center" }}>
         <div
           style={{
             display: "flex",
@@ -511,9 +472,36 @@ function TabContent({
         </div>
       </div>
     );
+  } else if (!displayText) {
+    // Nothing yet — queued during main stream or never run
+    contentBody = (
+      <div style={{ padding: "28px 0", textAlign: "center" }}>
+        {isStreaming ? (
+          <div style={{ color: "#404058", fontSize: 13 }}>
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="#2a2a48"
+              strokeWidth="2"
+              style={{ display: "block", margin: "0 auto 10px" }}
+            >
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 6v6l4 2" />
+            </svg>
+            Analysis queued — will appear shortly
+          </div>
+        ) : (
+          <div style={{ color: "#404058", fontSize: 13 }}>
+            No data — click Refresh to run this analysis
+          </div>
+        )}
+      </div>
+    );
+  } else {
+    contentBody = renderMarkdown(displayText, showCursor);
   }
-
-  const canRefresh = !isStreaming && !isRefreshing && !!completedText;
 
   return (
     <div
@@ -524,7 +512,7 @@ function TabContent({
         padding: "20px 24px",
       }}
     >
-      {/* Data-points header + refresh button */}
+      {/* Data-points header + refresh button — always visible */}
       <div
         style={{
           display: "flex",
@@ -538,61 +526,58 @@ function TabContent({
       >
         <DataPointsHeader tabId={section} meta={meta} />
 
-        {/* Refresh button — only shown when analysis is complete */}
-        {(canRefresh || isRefreshing) && (
-          <button
-            onClick={() => !isRefreshing && onRefresh(section)}
-            disabled={isRefreshing}
-            title="Re-run this analysis"
-            style={{
-              flexShrink: 0,
-              display: "flex",
-              alignItems: "center",
-              gap: 5,
-              background: "none",
-              border: "1px solid #252535",
-              borderRadius: 6,
-              padding: "4px 10px",
-              color: isRefreshing ? "#404058" : "#606080",
-              fontSize: 11,
-              cursor: isRefreshing ? "default" : "pointer",
-              transition: "all 0.12s",
-              marginTop: 1,
-            }}
-            onMouseEnter={(e) => {
-              if (!isRefreshing) {
-                e.currentTarget.style.borderColor = "#3b82f6";
-                e.currentTarget.style.color = "#60a5fa";
-              }
-            }}
-            onMouseLeave={(e) => {
-              if (!isRefreshing) {
-                e.currentTarget.style.borderColor = "#252535";
-                e.currentTarget.style.color = "#606080";
-              }
-            }}
+        <button
+          onClick={() => !refreshDisabled && onRefresh(section)}
+          disabled={refreshDisabled}
+          title="Re-run this analysis"
+          style={{
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            background: "none",
+            border: `1px solid ${refreshDisabled ? "#1e1e2e" : "#252535"}`,
+            borderRadius: 6,
+            padding: "4px 10px",
+            color: refreshDisabled ? "#303048" : "#606080",
+            fontSize: 11,
+            cursor: refreshDisabled ? "default" : "pointer",
+            transition: "all 0.12s",
+            marginTop: 1,
+          }}
+          onMouseEnter={(e) => {
+            if (!refreshDisabled) {
+              e.currentTarget.style.borderColor = "#3b82f6";
+              e.currentTarget.style.color = "#60a5fa";
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (!refreshDisabled) {
+              e.currentTarget.style.borderColor = "#252535";
+              e.currentTarget.style.color = "#606080";
+            }
+          }}
+        >
+          <svg
+            width="11"
+            height="11"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            style={isRefreshing ? { animation: "spin 1s linear infinite" } : {}}
           >
-            <svg
-              width="11"
-              height="11"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              style={isRefreshing ? { animation: "spin 1s linear infinite" } : {}}
-            >
-              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-              <path d="M21 3v5h-5" />
-              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
-              <path d="M8 16H3v5" />
-            </svg>
-            {isRefreshing ? "Refreshing…" : "Refresh"}
-          </button>
-        )}
+            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+            <path d="M21 3v5h-5" />
+            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+            <path d="M8 16H3v5" />
+          </svg>
+          {isRefreshing ? "Refreshing…" : "Refresh"}
+        </button>
       </div>
 
       {/* Analysis content */}
-      {renderMarkdown(displayText, showCursor)}
+      {contentBody}
     </div>
   );
 }
