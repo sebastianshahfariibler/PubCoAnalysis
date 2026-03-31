@@ -4,11 +4,20 @@ export interface CompanyInfo {
   ticker: string;
 }
 
+export type TabName = "earnings" | "financials" | "themes";
+
+export interface AnalysisTabs {
+  earnings: string;
+  financials: string;
+  themes: string;
+}
+
 export interface AnalysisRecord {
   id: string;
   company: CompanyInfo;
   timestamp: number;
-  analysis: string;
+  quarters: number;
+  tabs: AnalysisTabs;
 }
 
 export interface EarningsRelease {
@@ -16,6 +25,7 @@ export interface EarningsRelease {
   period: string;
   form: string;
   text: string;
+  isTranscript?: boolean;
 }
 
 export interface FinancialPeriod {
@@ -36,8 +46,8 @@ export interface FinancialSummary {
 }
 
 export interface SSEEvent {
-  type: "text" | "error" | "done" | "meta";
+  type: "text" | "error" | "done" | "status" | "section_start" | "section_done";
   content?: string;
   message?: string;
-  meta?: Record<string, unknown>;
+  section?: TabName;
 }

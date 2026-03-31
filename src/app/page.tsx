@@ -3,15 +3,31 @@
 import { useState, useCallback, useEffect } from "react";
 import Sidebar from "@/components/Sidebar";
 import SearchBar from "@/components/SearchBar";
-import AnalysisReport from "@/components/AnalysisReport";
-import CompetitorPanel from "@/components/CompetitorPanel";
-import { AnalysisRecord, CompanyInfo } from "@/types";
+import QuarterSelector from "@/components/QuarterSelector";
+import TabView from "@/components/TabView";
+import { AnalysisRecord, AnalysisTabs, CompanyInfo, TabName } from "@/types";
 
 // localStorage helpers (safe for SSR)
 function loadHistory(): AnalysisRecord[] {
   if (typeof window === "undefined") return [];
   try {
-    return JSON.parse(localStorage.getItem("esa_history") ?? "[]");
+    const raw = JSON.parse(localStorage.getItem("esa_history") ?? "[]") as Array<
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      any
+    >;
+    // Migrate old records that stored analysis as a plain string
+    return raw.map((r) => {
+      if (typeof r.analysis === "string" && !r.tabs) {
+        return {
+          id: r.id,
+          company: r.company,
+          timestamp: r.timestamp,
+          quarters: 4,
+          tabs: { earnings: r.analysis, financials: "", themes: "" } as AnalysisTabs,
+        } as AnalysisRecord;
+      }
+      return r as AnalysisRecord;
+    });
   } catch {
     return [];
   }
@@ -26,104 +42,151 @@ function saveHistory(records: AnalysisRecord[]) {
 
 type AppMode =
   | { kind: "idle" }
-  | { kind: "analyzing"; company: CompanyInfo; text: string; statusMsg: string }
+  | {
+      kind: "analyzing";
+      company: CompanyInfo;
+      quarters: number;
+      tabs: Partial<AnalysisTabs>;
+      currentSection: TabName | null;
+      streamingText: string;
+      statusMsg: string;
+    }
   | { kind: "viewing"; record: AnalysisRecord };
 
 export default function Home() {
   const [history, setHistory] = useState<AnalysisRecord[]>([]);
   const [mode, setMode] = useState<AppMode>({ kind: "idle" });
   const [showSidebar, setShowSidebar] = useState(true);
+  const [quarters, setQuarters] = useState(4);
 
   // Load history from localStorage on mount
   useEffect(() => {
     setHistory(loadHistory());
   }, []);
 
-  const handleCompanySelect = useCallback(async (company: CompanyInfo) => {
-    setMode({ kind: "analyzing", company, text: "", statusMsg: "Connecting to SEC EDGAR…" });
-
-    try {
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(company),
+  const handleCompanySelect = useCallback(
+    async (company: CompanyInfo) => {
+      setMode({
+        kind: "analyzing",
+        company,
+        quarters,
+        tabs: {},
+        currentSection: null,
+        streamingText: "",
+        statusMsg: "Connecting to SEC EDGAR…",
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      try {
+        const response = await fetch("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...company, quarters }),
+        });
 
-      if (!response.body) throw new Error("No response stream");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let fullText = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6)) as {
-              type: string;
-              content?: string;
-              message?: string;
-            };
-
-            if (event.type === "status" && event.message) {
-              setMode((prev) =>
-                prev.kind === "analyzing"
-                  ? { ...prev, statusMsg: event.message! }
-                  : prev
-              );
-            } else if (event.type === "text" && event.content) {
-              fullText += event.content;
-              const captured = fullText;
-              setMode((prev) =>
-                prev.kind === "analyzing"
-                  ? { ...prev, text: captured }
-                  : prev
-              );
-            } else if (event.type === "done") {
-              const record: AnalysisRecord = {
-                id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-                company,
-                timestamp: Date.now(),
-                analysis: fullText,
-              };
-              setHistory((prev) => {
-                const updated = [record, ...prev];
-                saveHistory(updated);
-                return updated;
-              });
-              setMode({ kind: "viewing", record });
-            } else if (event.type === "error") {
-              setMode({
-                kind: "analyzing",
-                company,
-                text: fullText,
-                statusMsg: `Error: ${event.message ?? "Unknown error"}`,
-              });
-            }
-          } catch {}
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
         }
+
+        if (!response.body) throw new Error("No response stream");
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        // Local vars to accumulate section text across closures
+        let currentSection: TabName | null = null;
+        let sectionText = "";
+        const completedTabs: Partial<AnalysisTabs> = {};
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const event = JSON.parse(line.slice(6)) as {
+                type: string;
+                content?: string;
+                message?: string;
+                section?: TabName;
+              };
+
+              if (event.type === "status" && event.message) {
+                setMode((prev) =>
+                  prev.kind === "analyzing"
+                    ? { ...prev, statusMsg: event.message! }
+                    : prev
+                );
+              } else if (event.type === "section_start" && event.section) {
+                currentSection = event.section;
+                sectionText = "";
+                setMode((prev) =>
+                  prev.kind === "analyzing"
+                    ? { ...prev, currentSection: event.section!, streamingText: "" }
+                    : prev
+                );
+              } else if (event.type === "text" && event.content) {
+                sectionText += event.content;
+                const captured = sectionText;
+                setMode((prev) =>
+                  prev.kind === "analyzing"
+                    ? { ...prev, streamingText: captured }
+                    : prev
+                );
+              } else if (event.type === "section_done" && currentSection) {
+                completedTabs[currentSection] = sectionText;
+                const snapshot = { ...completedTabs };
+                setMode((prev) =>
+                  prev.kind === "analyzing"
+                    ? { ...prev, tabs: snapshot, streamingText: "", currentSection: null }
+                    : prev
+                );
+                currentSection = null;
+                sectionText = "";
+              } else if (event.type === "done") {
+                const record: AnalysisRecord = {
+                  id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                  company,
+                  timestamp: Date.now(),
+                  quarters,
+                  tabs: {
+                    earnings: completedTabs.earnings ?? "",
+                    financials: completedTabs.financials ?? "",
+                    themes: completedTabs.themes ?? "",
+                  },
+                };
+                setHistory((prev) => {
+                  const updated = [record, ...prev];
+                  saveHistory(updated);
+                  return updated;
+                });
+                setMode({ kind: "viewing", record });
+              } else if (event.type === "error") {
+                setMode((prev) =>
+                  prev.kind === "analyzing"
+                    ? { ...prev, statusMsg: `Error: ${event.message ?? "Unknown error"}` }
+                    : prev
+                );
+              }
+            } catch {}
+          }
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Analysis failed";
+        setMode((prev) =>
+          prev.kind === "analyzing"
+            ? { ...prev, statusMsg: `Error: ${message}` }
+            : prev
+        );
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Analysis failed";
-      setMode((prev) =>
-        prev.kind === "analyzing"
-          ? { ...prev, statusMsg: `Error: ${message}` }
-          : prev
-      );
-    }
-  }, []);
+    },
+    [quarters]
+  );
 
   function handleSelectRecord(record: AnalysisRecord) {
     setMode({ kind: "viewing", record });
@@ -151,17 +214,7 @@ export default function Home() {
       ? mode.record.company
       : null;
 
-  const currentText =
-    mode.kind === "analyzing"
-      ? mode.text
-      : mode.kind === "viewing"
-      ? mode.record.analysis
-      : "";
-
   const isStreaming = mode.kind === "analyzing";
-
-  const statusMsg =
-    mode.kind === "analyzing" ? mode.statusMsg : undefined;
 
   const selectedId =
     mode.kind === "viewing" ? mode.record.id : undefined;
@@ -273,7 +326,7 @@ export default function Home() {
               </div>
             )}
 
-          {/* Idle state: show search */}
+          {/* Idle state: show search + quarter selector */}
           {mode.kind === "idle" && (
             <div
               style={{
@@ -285,6 +338,7 @@ export default function Home() {
             >
               <div style={{ width: "100%" }}>
                 <SearchBar onCompanySelect={handleCompanySelect} />
+                <QuarterSelector value={quarters} onChange={setQuarters} />
               </div>
             </div>
           )}
@@ -330,18 +384,26 @@ export default function Home() {
                 </div>
               )}
 
-              <AnalysisReport
-                company={currentCompany}
-                text={currentText}
-                isStreaming={isStreaming}
-                statusMessage={statusMsg}
-              />
+              {mode.kind === "analyzing" && (
+                <TabView
+                  company={currentCompany}
+                  tabs={mode.tabs}
+                  currentSection={mode.currentSection}
+                  streamingText={mode.streamingText}
+                  isStreaming={true}
+                  statusMessage={mode.statusMsg}
+                  quarters={mode.quarters}
+                />
+              )}
 
-              {/* Competitor analysis — keyed by CIK so state resets on tab switch */}
               {mode.kind === "viewing" && (
-                <CompetitorPanel
-                  key={mode.record.company.cik}
-                  company={mode.record.company}
+                <TabView
+                  company={currentCompany}
+                  tabs={mode.record.tabs}
+                  currentSection={null}
+                  streamingText=""
+                  isStreaming={false}
+                  quarters={mode.record.quarters}
                 />
               )}
             </>

@@ -132,6 +132,32 @@ async function fetchDocument(
   return stripHtml(text).slice(0, 15000);
 }
 
+// ── Filing Index ──────────────────────────────────────────────────────────────
+
+interface FilingIndexItem {
+  name: string;
+  type: string;
+  size: string;
+}
+
+async function getFilingIndex(
+  cik: string,
+  accessionNumber: string
+): Promise<FilingIndexItem[]> {
+  const accNo = accessionNumber.replace(/-/g, "");
+  const url = `${EDGAR_ARCHIVES}/${cik}/${accNo}/index.json`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": HEADERS["User-Agent"] },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data?.directory?.item ?? []) as FilingIndexItem[];
+  } catch {
+    return [];
+  }
+}
+
 // ── Earnings Releases ─────────────────────────────────────────────────────────
 
 async function collectFilings(
@@ -170,8 +196,10 @@ async function collectFilings(
 }
 
 export async function getEarningsReleases(
-  cik: string
+  cik: string,
+  quarters = 4
 ): Promise<EarningsRelease[]> {
+  const limit = Math.min(Math.max(quarters, 2), 8);
   const subs = await getSubmissions(cik);
   const { recent } = subs.filings;
 
@@ -179,40 +207,121 @@ export async function getEarningsReleases(
   let results = await collectFilings(
     cik, recent,
     (form, items) => (form === "8-K" || form === "8-K/A") && items.includes("2.02"),
-    4, []
+    limit, []
   );
 
   // Pass 2: 8-K / 8-K/A with item 7.01 (Regulation FD — transcripts & supplemental)
-  if (results.length < 4) {
+  if (results.length < limit) {
     results = await collectFilings(
       cik, recent,
       (form, items) => (form === "8-K" || form === "8-K/A") && items.includes("7.01"),
-      4, results
+      limit, results
     );
   }
 
   // Pass 3: 10-Q (quarterly reports with full MD&A)
-  if (results.length < 4) {
+  if (results.length < limit) {
     results = await collectFilings(
       cik, recent,
       (form) => form === "10-Q",
-      4, results
+      limit, results
     );
   }
 
-  // Pass 4: 10-K (annual reports) if still under 4
-  if (results.length < 4) {
+  // Pass 4: 10-K (annual reports) if still under limit
+  if (results.length < limit) {
     results = await collectFilings(
       cik, recent,
       (form) => form === "10-K" || form === "10-K/A",
-      4, results
+      limit, results
     );
   }
 
-  // Sort by date descending, cap at 4
+  // Sort by date descending, cap at limit
   return results
     .sort((a, b) => b.date.localeCompare(a.date))
-    .slice(0, 4);
+    .slice(0, limit);
+}
+
+// ── Earnings Call Transcripts ─────────────────────────────────────────────────
+// Looks for transcript exhibits (Exhibit 99.1/99.2) in 8-K Item 7.01 filings
+
+export async function getTranscripts(
+  cik: string,
+  quarters = 4
+): Promise<EarningsRelease[]> {
+  const limit = Math.min(Math.max(quarters, 2), 8);
+  const subs = await getSubmissions(cik);
+  const { recent } = subs.filings;
+
+  const results: EarningsRelease[] = [];
+
+  for (let i = 0; i < recent.form.length && results.length < limit; i++) {
+    const form = recent.form[i];
+    const items = recent.items[i] ?? "";
+    if ((form !== "8-K" && form !== "8-K/A") || !items.includes("7.01")) continue;
+
+    const accNo = recent.accessionNumber[i];
+    const primaryDoc = recent.primaryDocument[i];
+    if (!primaryDoc) continue;
+
+    // Skip duplicates
+    if (results.some((r) => r.date === recent.filingDate[i])) continue;
+
+    try {
+      // Try to find transcript exhibit via filing index
+      const docs = await getFilingIndex(cik, accNo);
+      await sleep(150);
+
+      // Look for exhibit 99 files — transcripts are typically ex99*.htm
+      const exhibitFile = docs.find((d) => {
+        const n = d.name.toLowerCase();
+        return (
+          (n.includes("ex99") ||
+            n.includes("exhibit99") ||
+            n.includes("ex-99") ||
+            n.includes("transcript")) &&
+          (n.endsWith(".htm") || n.endsWith(".html") || n.endsWith(".txt"))
+        );
+      });
+
+      let text = "";
+      if (exhibitFile) {
+        text = await fetchDocument(cik, accNo, exhibitFile.name);
+        await sleep(150);
+      }
+
+      // Fall back to primary document if exhibit not found or too short
+      if (text.length < 500 && primaryDoc) {
+        text = await fetchDocument(cik, accNo, primaryDoc);
+        await sleep(150);
+      }
+
+      if (text.length > 200) {
+        // Detect if this looks like a real transcript (has Q&A markers)
+        const lowerText = text.toLowerCase();
+        const isTranscript =
+          text.length > 3000 &&
+          (lowerText.includes("operator") ||
+            lowerText.includes("analyst") ||
+            lowerText.includes("q&a") ||
+            lowerText.includes("question") ||
+            lowerText.includes("thank you"));
+
+        results.push({
+          date: recent.filingDate[i],
+          period: recent.reportDate[i] ?? recent.filingDate[i],
+          form,
+          text,
+          isTranscript,
+        });
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  return results.sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
 }
 
 // ── Financial Summary ─────────────────────────────────────────────────────────

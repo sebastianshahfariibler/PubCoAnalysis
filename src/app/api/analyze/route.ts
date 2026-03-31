@@ -2,11 +2,12 @@ import { NextRequest } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   getEarningsReleases,
+  getTranscripts,
   getFinancialSummary,
   formatFinancialSummary,
   getCompanyInfo,
 } from "@/lib/edgar";
-import { CompanyInfo } from "@/types";
+import { CompanyInfo, TabName } from "@/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300; // 5 minute timeout for Vercel
@@ -15,77 +16,239 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-function buildPrompt(
-  company: CompanyInfo & { sic?: string; sicDescription?: string },
-  releases: Awaited<ReturnType<typeof getEarningsReleases>>,
-  financialTable: string,
-  hasData: boolean
+type CompanyMeta = CompanyInfo & { sic?: string; sicDescription?: string };
+
+// ── Prompt builders ───────────────────────────────────────────────────────────
+
+function buildEarningsPrompt(
+  company: CompanyMeta,
+  transcripts: Awaited<ReturnType<typeof getTranscripts>>,
+  releases: Awaited<ReturnType<typeof getEarningsReleases>>
 ): string {
-  if (!hasData) {
-    return `The user requested an earnings analysis for ${company.name} (${company.ticker}), but no filings or financial data could be retrieved from the U.S. Securities and Exchange Commission (SEC) EDGAR database for this company. Please respond with exactly: "No data found for ${company.name} (${company.ticker}) in SEC EDGAR. This may be a non-US listed company or the data may not be available."`;
+  // Prefer transcripts, fall back to earnings releases
+  const docs = transcripts.length > 0 ? transcripts : releases;
+
+  if (docs.length === 0) {
+    return `No earnings call documents found for ${company.name} (${company.ticker ?? "N/A"}). Respond with exactly: "No earnings call data found for ${company.name} in SEC EDGAR."`;
   }
 
-  const releaseSections = releases
+  const docSections = docs
     .map(
       (r, i) =>
-        `### Filing ${i + 1}: ${r.form} — Period: ${r.period} | Filed: ${r.date}\n\n${r.text.slice(0, 8000)}\n`
+        `### Document ${i + 1}: ${r.form} — Period: ${r.period} | Filed: ${r.date}${r.isTranscript ? " [TRANSCRIPT]" : ""}\n\n${r.text.slice(0, 8000)}\n`
     )
     .join("\n---\n\n");
 
-  return `You are a senior equity analyst. Write a concise but rigorous report on ${company.name} (${company.ticker}).
+  return `You are a behavioral finance analyst. Analyze these earnings call documents for ${company.name} (${company.ticker ?? "N/A"}).
 
 **Style rules:**
-- Total response: 500–750 words maximum
+- 600–750 words maximum
 - Spell out every acronym in full the first time it appears, e.g. "Earnings Per Share (EPS)"
 - No filler phrases ("it is worth noting", "in conclusion", etc.)
-- Only reference data that actually appears in the filings below — do not speculate or fill gaps
-- If a section has insufficient data, write "Insufficient data" for that section only
+- Only reference data that actually appears in the documents below — do not speculate
+- Use direct quotes (in quotation marks) to support observations
 
-## COMPANY: ${company.name} (${company.ticker})
+## COMPANY: ${company.name} (${company.ticker ?? "N/A"})
 Industry: ${company.sicDescription ?? "N/A"} (Standard Industrial Classification (SIC): ${company.sic ?? "N/A"})
 
 ---
 
-## FILINGS (${releases.length} periods)
+## EARNINGS DOCUMENTS (${docs.length} periods)
 
-${releaseSections}
-
----
-
-## FINANCIAL SUMMARY
-
-${financialTable}
+${docSections}
 
 ---
 
 ## REPORT STRUCTURE
 
-### 1. TONE SNAPSHOT
-One sentence per filing period. Format: **[Period] — [Confident/Cautious/Defensive/Mixed]:** key theme + one direct quote if available.
+### 1. COMMUNICATION PROFILE PER PERIOD
+One paragraph per period. Note: management tone, confidence signals, hedge language, and notable phrasing choices.
 
-### 2. STRATEGIC HYPOTHESIS
-3–5 bullet points. What is management betting on over the next 2–3 years? Reference specific initiatives, markets, or capital allocation signals from the filings.
+### 2. BEHAVIORAL MARKERS
+Bullet list of notable linguistic patterns with direct quotes. For each marker, state what it likely signals strategically.
 
-### 3. PROMISES VS. ACTUALS
-For each period that has a subsequent period to compare against, list guidance given then show what happened:
+### 3. STRATEGIC SIGNALS FROM LANGUAGE
+3–5 bullets: What is management revealing (or concealing) through word choice, topic emphasis, and framing?
+
+### 4. LANGUAGE EVOLUTION
+How has communication style shifted across periods? Topics that appeared then disappeared? New vocabulary introduced? What does the trajectory suggest?`;
+}
+
+function buildFinancialsPrompt(
+  company: CompanyMeta,
+  releases: Awaited<ReturnType<typeof getEarningsReleases>>,
+  financialTable: string,
+  hasData: boolean
+): string {
+  if (!hasData) {
+    return `No financial data found for ${company.name} (${company.ticker ?? "N/A"}) in SEC EDGAR. Respond with exactly: "No financial data found for ${company.name} in SEC EDGAR."`;
+  }
+
+  const releaseSections = releases
+    .map(
+      (r, i) =>
+        `### Filing ${i + 1}: ${r.form} — Period: ${r.period} | Filed: ${r.date}\n\n${r.text.slice(0, 6000)}\n`
+    )
+    .join("\n---\n\n");
+
+  return `You are a senior equity analyst. Provide quantitative financial analysis for ${company.name} (${company.ticker ?? "N/A"}).
+
+**Style rules:**
+- 500–650 words maximum
+- Spell out every acronym in full the first time it appears
+- No filler phrases
+- Only reference data from the provided filings and financial table
+- If a metric is unavailable, write "N/A"
+
+## COMPANY: ${company.name} (${company.ticker ?? "N/A"})
+Industry: ${company.sicDescription ?? "N/A"} (SIC: ${company.sic ?? "N/A"})
+
+---
+
+## FINANCIAL SUMMARY TABLE
+
+${financialTable}
+
+---
+
+## FILING EXCERPTS (${releases.length} periods)
+
+${releaseSections}
+
+---
+
+## REPORT STRUCTURE
+
+### 1. FINANCIAL SNAPSHOT
+3–4 bullet points: key metrics as of the most recent period and their trend direction.
+
+### 2. REVENUE AND PROFITABILITY TRENDS
+Quarterly progression, margin trajectory, acceleration or deceleration signals.
+
+### 3. GUIDANCE VS. ACTUALS
+For each period with prior guidance visible in the filings:
 - ✅ **MET:** [promise] → [actual]
 - ⚠️ **MISSED:** [promise] → [actual] [¹]
 
-Footnotes at end of section:
+Footnotes:
 > [¹] "exact quote" — [Filing date]
 
-If no comparable periods exist, write "Insufficient data for comparison."
+If no comparable periods: "Insufficient data for comparison."
 
-### 4. EXECUTION ASSESSMENT
-- **Grade:** A/B/C/D with one-sentence rationale
-- **Management Credibility:** X/10
-- **Key strength:** one line
-- **Key risk:** one line`;
+### 4. BALANCE SHEET AND CAPITAL ALLOCATION
+Cash trends, debt levels, buybacks, dividends, and investment signals from the data.
+
+### 5. KEY RISK FLAGS
+2–3 specific quantitative concerns from the data only.`;
 }
 
+function buildThemesPrompt(
+  company: CompanyMeta,
+  transcripts: Awaited<ReturnType<typeof getTranscripts>>,
+  releases: Awaited<ReturnType<typeof getEarningsReleases>>
+): string {
+  // Combine transcripts and releases, de-duplicate by date, prefer transcripts
+  const allDocs = [...transcripts];
+  for (const r of releases) {
+    if (!allDocs.some((d) => d.date === r.date)) allDocs.push(r);
+  }
+  allDocs.sort((a, b) => b.date.localeCompare(a.date));
+  const docs = allDocs.slice(0, 8);
+
+  if (docs.length === 0) {
+    return `No documents found for ${company.name}. Respond with exactly: "No data available for theme tracking."`;
+  }
+
+  const docSections = docs
+    .map(
+      (r, i) =>
+        `### Document ${i + 1}: ${r.form} — Period: ${r.period} | Filed: ${r.date}\n\n${r.text.slice(0, 5000)}\n`
+    )
+    .join("\n---\n\n");
+
+  const periodLabels = docs.map((d) => d.period).join(" | ");
+
+  return `You are a strategic communications analyst. Identify and track key management narrative themes across earnings periods for ${company.name} (${company.ticker ?? "N/A"}).
+
+**Style rules:**
+- 400–550 words maximum
+- Use tables where helpful — they are strongly preferred for the theme inventory
+- No filler phrases
+- Only reference themes from the provided documents
+- Be specific: name actual themes management discusses (e.g. "AI integration", "margin expansion", "supply chain normalization")
+
+## COMPANY: ${company.name} (${company.ticker ?? "N/A"})
+Periods covered (newest first): ${periodLabels}
+
+---
+
+## EARNINGS DOCUMENTS (${docs.length} periods)
+
+${docSections}
+
+---
+
+## REPORT STRUCTURE
+
+### 1. THEME INVENTORY TABLE
+Track the main themes across all periods. Column headers should be the actual period dates.
+Use these symbols:
+- ● = Emphasized
+- ◐ = Mentioned briefly
+- ○ = Absent
+- ↑ = Intensifying
+- ↓ = Fading
+
+| Theme | [Period 1] | [Period 2] | [Period 3] | [Period 4] | Trajectory |
+|-------|-----------|-----------|-----------|-----------|------------|
+
+### 2. EMERGING THEMES
+Themes introduced in the 1–2 most recent periods. What new narratives is management establishing?
+
+### 3. DROPPED THEMES
+Topics prominent early that have since diminished or disappeared. What is management moving away from?
+
+### 4. PERSISTENT THEMES
+Core narratives appearing consistently across all periods — management's stable long-term story.
+
+### 5. STRATEGIC NARRATIVE SHIFT
+One paragraph: how has the overall narrative evolved from the earliest to the most recent period?`;
+}
+
+// ── Streaming helper ──────────────────────────────────────────────────────────
+
+async function streamSection(
+  section: TabName,
+  prompt: string,
+  send: (event: object) => void
+): Promise<void> {
+  send({ type: "section_start", section });
+
+  const claudeStream = await anthropic.messages.stream({
+    model: "claude-opus-4-6",
+    max_tokens: 3000,
+    thinking: { type: "adaptive" },
+    messages: [{ role: "user", content: prompt }],
+  });
+
+  for await (const chunk of claudeStream) {
+    if (
+      chunk.type === "content_block_delta" &&
+      chunk.delta.type === "text_delta"
+    ) {
+      send({ type: "text", content: chunk.delta.text, section });
+    }
+  }
+
+  send({ type: "section_done", section });
+}
+
+// ── Route handler ─────────────────────────────────────────────────────────────
+
 export async function POST(request: NextRequest) {
-  const body = await request.json() as CompanyInfo;
+  const body = (await request.json()) as CompanyInfo & { quarters?: number };
   const { cik, name, ticker } = body;
+  const quarters = Math.min(Math.max(body.quarters ?? 4, 2), 8);
 
   if (!cik || !name) {
     return new Response(
@@ -105,30 +268,31 @@ export async function POST(request: NextRequest) {
       };
 
       try {
-        send({ type: "status", message: "Fetching company data from SEC EDGAR…" });
+        send({ type: "status", message: "Fetching SEC EDGAR data…" });
 
-        // Fetch in parallel to save time
-        const [earningsReleases, financialSummary, companyMeta] =
+        // Fetch all data sources in parallel
+        const [transcriptResult, releasesResult, financialsResult, metaResult] =
           await Promise.allSettled([
-            getEarningsReleases(cik),
+            getTranscripts(cik, quarters),
+            getEarningsReleases(cik, quarters),
             getFinancialSummary(cik),
             getCompanyInfo(cik),
           ]);
 
+        const transcripts =
+          transcriptResult.status === "fulfilled" ? transcriptResult.value : [];
         const releases =
-          earningsReleases.status === "fulfilled" ? earningsReleases.value : [];
+          releasesResult.status === "fulfilled" ? releasesResult.value : [];
         const financials =
-          financialSummary.status === "fulfilled"
-            ? financialSummary.value
-            : null;
+          financialsResult.status === "fulfilled" ? financialsResult.value : null;
         const meta =
-          companyMeta.status === "fulfilled" ? companyMeta.value : null;
+          metaResult.status === "fulfilled" ? metaResult.value : null;
 
         const financialTable = financials
           ? formatFinancialSummary(financials)
           : "Financial data not available for this company.";
 
-        const company = {
+        const company: CompanyMeta = {
           cik,
           name,
           ticker,
@@ -136,35 +300,34 @@ export async function POST(request: NextRequest) {
           sicDescription: meta?.sicDescription,
         };
 
-        const hasData =
+        const hasFinancialData =
           releases.length > 0 ||
           financialTable !== "Financial data not available for this company.";
 
         send({
           type: "status",
-          message: hasData
-            ? `Found ${releases.length} filing(s). Running AI analysis…`
-            : "No filings found. Returning no-data response…",
+          message: `Found ${transcripts.length} transcript(s), ${releases.length} filing(s). Running analysis…`,
         });
 
-        const prompt = buildPrompt(company, releases, financialTable, hasData);
+        // ── Section 1: Earnings Calls Analysis ──
+        send({ type: "status", message: "Analyzing earnings calls…" });
+        const earningsPrompt = buildEarningsPrompt(company, transcripts, releases);
+        await streamSection("earnings", earningsPrompt, send);
 
-        // Stream Claude response
-        const claudeStream = await anthropic.messages.stream({
-          model: "claude-opus-4-6",
-          max_tokens: 4000,
-          thinking: { type: "adaptive" },
-          messages: [{ role: "user", content: prompt }],
-        });
+        // ── Section 2: Financial Filing Analysis ──
+        send({ type: "status", message: "Analyzing financial filings…" });
+        const financialsPrompt = buildFinancialsPrompt(
+          company,
+          releases,
+          financialTable,
+          hasFinancialData
+        );
+        await streamSection("financials", financialsPrompt, send);
 
-        for await (const chunk of claudeStream) {
-          if (
-            chunk.type === "content_block_delta" &&
-            chunk.delta.type === "text_delta"
-          ) {
-            send({ type: "text", content: chunk.delta.text });
-          }
-        }
+        // ── Section 3: Theme Tracker ──
+        send({ type: "status", message: "Tracking themes across periods…" });
+        const themesPrompt = buildThemesPrompt(company, transcripts, releases);
+        await streamSection("themes", themesPrompt, send);
 
         send({ type: "done" });
       } catch (error) {
