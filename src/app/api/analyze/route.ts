@@ -328,12 +328,15 @@ export async function POST(request: NextRequest) {
       try {
         send({ type: "status", message: "Fetching SEC EDGAR data…" });
 
-        // Fetch all data sources in parallel
+        // Fetch only what the requested section(s) need
+        const needsTranscripts = sectionOnly !== "financials";
+        const needsFinancials  = sectionOnly !== "earnings";
+
         const [transcriptResult, releasesResult, financialsResult, metaResult] =
           await Promise.allSettled([
-            getTranscripts(cik, quarters),
+            needsTranscripts ? getTranscripts(cik, quarters) : Promise.resolve([]),
             getEarningsReleases(cik, quarters),
-            getFinancialSummary(cik),
+            needsFinancials  ? getFinancialSummary(cik)      : Promise.resolve(null),
             getCompanyInfo(cik),
           ]);
 

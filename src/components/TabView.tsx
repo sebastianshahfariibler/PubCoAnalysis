@@ -18,6 +18,12 @@ interface TabViewProps {
   onSectionRefreshed?: (section: TabName, text: string, meta: AnalysisMeta) => void;
 }
 
+const TAB_LABELS: Record<TabName, string> = {
+  earnings: "Earnings Calls",
+  financials: "Financial Filing",
+  themes: "Theme Tracker",
+};
+
 const TAB_CONFIG: { id: TabViewTab; label: string; icon: React.ReactNode }[] = [
   {
     id: "earnings",
@@ -407,6 +413,106 @@ function renderMarkdown(text: string, isStreaming: boolean): React.ReactNode[] {
 
 // ── Tab content ───────────────────────────────────────────────────────────────
 
+function RunAnalysisCard({
+  section,
+  company,
+  isRunning,
+  statusMessage,
+  onRun,
+}: {
+  section: TabName;
+  company: CompanyInfo;
+  isRunning: boolean;
+  statusMessage?: string;
+  onRun: () => void;
+}) {
+  const label = TAB_LABELS[section];
+  return (
+    <div
+      style={{
+        background: "#14141c",
+        border: "1px dashed #2a2a38",
+        borderRadius: 12,
+        padding: "32px 20px",
+        textAlign: "center",
+      }}
+    >
+      {isRunning ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            color: "#808098",
+            fontSize: 13.5,
+          }}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            style={{ animation: "spin 1s linear infinite", flexShrink: 0 }}
+          >
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+          </svg>
+          {statusMessage ?? `Running ${label} analysis…`}
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 13, color: "#606078", marginBottom: 16 }}>
+            Run <strong style={{ color: "#9090b8" }}>{label}</strong> analysis for{" "}
+            <strong style={{ color: "#9090b8" }}>{company.name}</strong>
+          </div>
+          <button
+            onClick={onRun}
+            style={{
+              background: "linear-gradient(135deg, #1e3a6a, #1a1a50)",
+              border: "1px solid #2a3a6a",
+              borderRadius: 9,
+              padding: "10px 24px",
+              color: "#90c0ff",
+              fontSize: 13.5,
+              fontWeight: 600,
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              transition: "all 0.15s",
+            }}
+            onMouseEnter={(e) =>
+              (e.currentTarget.style.background =
+                "linear-gradient(135deg, #253d70, #20205a)")
+            }
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.background =
+                "linear-gradient(135deg, #1e3a6a, #1a1a50)")
+            }
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+            Run {label} Analysis
+          </button>
+          <div style={{ fontSize: 11, color: "#404055", marginTop: 10 }}>
+            Uses SEC EDGAR data · Takes ~30–60s
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function TabContent({
   tabId,
   tabs,
@@ -449,70 +555,34 @@ function TabContent({
     : completedText;
 
   const showCursor = isRefreshing || isMainStreaming;
-  // Button is disabled only while this specific section is actively streaming/refreshing
-  const refreshDisabled = isMainStreaming || isRefreshing;
 
-  // Decide what to render in the content area
-  let contentBody: React.ReactNode;
-  if ((isMainStreaming || isRefreshing) && !displayText) {
-    // Waiting for first tokens
-    contentBody = (
-      <div style={{ padding: "20px 0", textAlign: "center" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 10,
-            color: "#808098",
-            fontSize: 13.5,
-          }}
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            style={{ animation: "spin 1s linear infinite", flexShrink: 0 }}
-          >
-            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-          </svg>
-          {statusMessage ?? "Analyzing…"}
-        </div>
-      </div>
+  // No content yet and not actively streaming → show the Run Analysis card
+  if (!displayText && !isMainStreaming && !isRefreshing) {
+    return (
+      <RunAnalysisCard
+        section={section}
+        company={company}
+        isRunning={false}
+        onRun={() => onRefresh(section)}
+      />
     );
-  } else if (!displayText) {
-    // Nothing yet — queued during main stream or never run
-    contentBody = (
-      <div style={{ padding: "28px 0", textAlign: "center" }}>
-        {isStreaming ? (
-          <div style={{ color: "#404058", fontSize: 13 }}>
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="#2a2a48"
-              strokeWidth="2"
-              style={{ display: "block", margin: "0 auto 10px" }}
-            >
-              <circle cx="12" cy="12" r="10" />
-              <path d="M12 6v6l4 2" />
-            </svg>
-            Analysis queued — will appear shortly
-          </div>
-        ) : (
-          <div style={{ color: "#404058", fontSize: 13 }}>
-            No data — click Refresh to run this analysis
-          </div>
-        )}
-      </div>
-    );
-  } else {
-    contentBody = renderMarkdown(displayText, showCursor);
   }
+
+  // Actively streaming/refreshing but no tokens yet → show inside the card
+  if ((isMainStreaming || isRefreshing) && !displayText) {
+    return (
+      <RunAnalysisCard
+        section={section}
+        company={company}
+        isRunning={true}
+        statusMessage={statusMessage}
+        onRun={() => onRefresh(section)}
+      />
+    );
+  }
+
+  // Has content — show it with a small Refresh button in the corner
+  const refreshDisabled = isMainStreaming || isRefreshing;
 
   return (
     <div
@@ -523,7 +593,7 @@ function TabContent({
         padding: "20px 24px",
       }}
     >
-      {/* Data-points header + refresh button — always visible */}
+      {/* Sources + refresh */}
       <div
         style={{
           display: "flex",
@@ -587,8 +657,7 @@ function TabContent({
         </button>
       </div>
 
-      {/* Analysis content */}
-      {contentBody}
+      {renderMarkdown(displayText, showCursor)}
     </div>
   );
 }
