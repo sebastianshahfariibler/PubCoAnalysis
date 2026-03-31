@@ -12,12 +12,25 @@ export interface AnalysisTabs {
   themes: string;
 }
 
+export interface DocRef {
+  date: string;
+  period: string;
+  form: string;
+  isTranscript?: boolean;
+}
+
+export interface AnalysisMeta {
+  transcripts: DocRef[];
+  releases: DocRef[];
+}
+
 export interface AnalysisRecord {
   id: string;
   company: CompanyInfo;
   timestamp: number;
   quarters: number;
   tabs: AnalysisTabs;
+  meta?: AnalysisMeta;
 }
 
 export interface EarningsRelease {
@@ -46,8 +59,9 @@ export interface FinancialSummary {
 }
 
 export interface SSEEvent {
-  type: "text" | "error" | "done" | "status" | "section_start" | "section_done";
+  type: "text" | "error" | "done" | "status" | "section_start" | "section_done" | "meta";
   content?: string;
   message?: string;
   section?: TabName;
+  meta?: AnalysisMeta;
 }

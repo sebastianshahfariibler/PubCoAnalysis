@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { CompanyInfo, AnalysisTabs, TabName } from "@/types";
+import { CompanyInfo, AnalysisTabs, TabName, AnalysisMeta } from "@/types";
 import CompetitorPanel from "./CompetitorPanel";
 
 type TabViewTab = TabName | "competitive";
@@ -14,6 +14,8 @@ interface TabViewProps {
   isStreaming: boolean;
   statusMessage?: string;
   quarters: number;
+  meta?: AnalysisMeta;
+  onSectionRefreshed?: (section: TabName, text: string, meta: AnalysisMeta) => void;
 }
 
 const TAB_CONFIG: { id: TabViewTab; label: string; icon: React.ReactNode }[] = [
@@ -57,6 +59,101 @@ const TAB_CONFIG: { id: TabViewTab; label: string; icon: React.ReactNode }[] = [
     ),
   },
 ];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function toQuarterLabel(dateStr: string): string {
+  if (!dateStr) return dateStr;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  const q = Math.ceil((d.getMonth() + 1) / 3);
+  return `Q${q} ${d.getFullYear()}`;
+}
+
+// ── Data-points header ────────────────────────────────────────────────────────
+
+function DataPointsHeader({
+  tabId,
+  meta,
+}: {
+  tabId: TabName;
+  meta: AnalysisMeta | undefined;
+}) {
+  if (!meta) return null;
+
+  // Choose which doc list is relevant per tab
+  let docs =
+    tabId === "financials"
+      ? meta.releases
+      : tabId === "earnings"
+      ? meta.transcripts.length > 0
+        ? meta.transcripts
+        : meta.releases
+      : // themes: combine unique by date
+        (() => {
+          const all = [...meta.transcripts];
+          for (const r of meta.releases) {
+            if (!all.some((d) => d.date === r.date)) all.push(r);
+          }
+          return all.sort((a, b) => b.date.localeCompare(a.date));
+        })();
+
+  if (!docs || docs.length === 0) return null;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        flexWrap: "wrap",
+        marginBottom: 14,
+        paddingBottom: 12,
+        borderBottom: "1px solid #1a1a26",
+      }}
+    >
+      <span style={{ fontSize: 11, color: "#404058", flexShrink: 0 }}>
+        Sources:
+      </span>
+      {docs.map((doc, i) => (
+        <span
+          key={i}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            background: "#13131e",
+            border: "1px solid #222234",
+            borderRadius: 5,
+            padding: "2px 8px",
+            fontSize: 11,
+            color: "#8080a8",
+            whiteSpace: "nowrap",
+          }}
+        >
+          <span style={{ color: "#505070", fontSize: 10 }}>{doc.form}</span>
+          {toQuarterLabel(doc.period || doc.date)}
+          {doc.isTranscript && (
+            <span
+              style={{
+                background: "#1a2a1a",
+                border: "1px solid #2a4a2a",
+                borderRadius: 3,
+                padding: "0 4px",
+                color: "#5a9a5a",
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: "0.05em",
+              }}
+            >
+              TRANSCRIPT
+            </span>
+          )}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 // ── Minimal markdown renderer ─────────────────────────────────────────────────
 
@@ -277,7 +374,6 @@ function renderMarkdown(text: string, isStreaming: boolean): React.ReactNode[] {
 
   flushTable();
 
-  // Streaming cursor on last element
   if (isStreaming && nodes.length > 0) {
     nodes.push(
       <span
@@ -308,6 +404,10 @@ function TabContent({
   isStreaming,
   statusMessage,
   company,
+  meta,
+  refreshingSection,
+  refreshStreamText,
+  onRefresh,
 }: {
   tabId: TabViewTab;
   tabs: Partial<AnalysisTabs>;
@@ -316,19 +416,31 @@ function TabContent({
   isStreaming: boolean;
   statusMessage?: string;
   company: CompanyInfo;
+  meta?: AnalysisMeta;
+  refreshingSection: TabName | null;
+  refreshStreamText: string;
+  onRefresh: (section: TabName) => void;
 }) {
   if (tabId === "competitive") {
     return <CompetitorPanel key={company.cik} company={company} />;
   }
 
-  const isCurrentlyStreaming = currentSection === tabId;
-  const completedText = tabs[tabId as TabName] ?? "";
-  const displayText = isCurrentlyStreaming ? streamingText : completedText;
-  const showStreaming = isCurrentlyStreaming && isStreaming;
+  const section = tabId as TabName;
+  const isMainStreaming = currentSection === section && isStreaming;
+  const isRefreshing = refreshingSection === section;
+  const completedText = tabs[section] ?? "";
 
-  if (!displayText && !isCurrentlyStreaming) {
-    // Not started yet
-    const isPending = isStreaming;
+  // Priority: refresh stream > main stream > completed
+  const displayText = isRefreshing
+    ? refreshStreamText
+    : isMainStreaming
+    ? streamingText
+    : completedText;
+
+  const showCursor = isRefreshing || isMainStreaming;
+
+  // Not started yet (main analysis pending or no data)
+  if (!displayText && !isMainStreaming && !isRefreshing) {
     return (
       <div
         style={{
@@ -339,7 +451,7 @@ function TabContent({
           textAlign: "center",
         }}
       >
-        {isPending ? (
+        {isStreaming ? (
           <div style={{ color: "#404058", fontSize: 13 }}>
             <svg
               width="20"
@@ -362,8 +474,8 @@ function TabContent({
     );
   }
 
-  // Show loading state while streaming starts for this section
-  if (isCurrentlyStreaming && !displayText) {
+  // Loading spinner while section starts streaming
+  if ((isMainStreaming || isRefreshing) && !displayText) {
     return (
       <div
         style={{
@@ -401,16 +513,86 @@ function TabContent({
     );
   }
 
+  const canRefresh = !isStreaming && !isRefreshing && !!completedText;
+
   return (
     <div
       style={{
         background: "#14141c",
         border: "1px solid #2a2a38",
         borderRadius: 12,
-        padding: "24px 28px",
+        padding: "20px 24px",
       }}
     >
-      {renderMarkdown(displayText, showStreaming)}
+      {/* Data-points header + refresh button */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 12,
+          marginBottom: 14,
+          paddingBottom: 12,
+          borderBottom: "1px solid #1a1a26",
+        }}
+      >
+        <DataPointsHeader tabId={section} meta={meta} />
+
+        {/* Refresh button — only shown when analysis is complete */}
+        {(canRefresh || isRefreshing) && (
+          <button
+            onClick={() => !isRefreshing && onRefresh(section)}
+            disabled={isRefreshing}
+            title="Re-run this analysis"
+            style={{
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              background: "none",
+              border: "1px solid #252535",
+              borderRadius: 6,
+              padding: "4px 10px",
+              color: isRefreshing ? "#404058" : "#606080",
+              fontSize: 11,
+              cursor: isRefreshing ? "default" : "pointer",
+              transition: "all 0.12s",
+              marginTop: 1,
+            }}
+            onMouseEnter={(e) => {
+              if (!isRefreshing) {
+                e.currentTarget.style.borderColor = "#3b82f6";
+                e.currentTarget.style.color = "#60a5fa";
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!isRefreshing) {
+                e.currentTarget.style.borderColor = "#252535";
+                e.currentTarget.style.color = "#606080";
+              }
+            }}
+          >
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              style={isRefreshing ? { animation: "spin 1s linear infinite" } : {}}
+            >
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M8 16H3v5" />
+            </svg>
+            {isRefreshing ? "Refreshing…" : "Refresh"}
+          </button>
+        )}
+      </div>
+
+      {/* Analysis content */}
+      {renderMarkdown(displayText, showCursor)}
     </div>
   );
 }
@@ -425,8 +607,12 @@ export default function TabView({
   isStreaming,
   statusMessage,
   quarters,
+  meta,
+  onSectionRefreshed,
 }: TabViewProps) {
   const [activeTab, setActiveTab] = useState<TabViewTab>("earnings");
+  const [refreshingSection, setRefreshingSection] = useState<TabName | null>(null);
+  const [refreshStreamText, setRefreshStreamText] = useState("");
   const userSelectedRef = useRef(false);
 
   // Auto-follow the currently streaming section unless user manually picked a tab
@@ -436,15 +622,72 @@ export default function TabView({
     }
   }, [currentSection]);
 
-  // Reset user selection on new analysis
+  // Reset on new company
   useEffect(() => {
     userSelectedRef.current = false;
     setActiveTab("earnings");
+    setRefreshingSection(null);
+    setRefreshStreamText("");
   }, [company.cik]);
 
   function handleTabClick(tab: TabViewTab) {
     userSelectedRef.current = true;
     setActiveTab(tab);
+  }
+
+  async function handleRefresh(section: TabName) {
+    setRefreshingSection(section);
+    setRefreshStreamText("");
+    // Auto-switch to the tab being refreshed
+    userSelectedRef.current = true;
+    setActiveTab(section);
+
+    try {
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...company, quarters, section }),
+      });
+      if (!response.body) throw new Error("No stream");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let sectionText = "";
+      let latestMeta: AnalysisMeta | undefined;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (event.type === "meta" && event.meta) {
+              latestMeta = event.meta as AnalysisMeta;
+            } else if (event.type === "text" && event.content) {
+              sectionText += event.content;
+              const captured = sectionText;
+              setRefreshStreamText(captured);
+            } else if (event.type === "section_done") {
+              onSectionRefreshed?.(section, sectionText, latestMeta ?? meta ?? { transcripts: [], releases: [] });
+              setRefreshStreamText("");
+              setRefreshingSection(null);
+            } else if (event.type === "done") {
+              setRefreshingSection(null);
+            } else if (event.type === "error") {
+              setRefreshingSection(null);
+            }
+          } catch {}
+        }
+      }
+    } catch {
+      setRefreshingSection(null);
+    }
   }
 
   return (
@@ -487,7 +730,7 @@ export default function TabView({
             SEC EDGAR • CIK {company.cik} • {quarters}Q analysis
           </div>
         </div>
-        {isStreaming && (
+        {(isStreaming || refreshingSection) && (
           <div
             style={{
               marginLeft: "auto",
@@ -527,9 +770,9 @@ export default function TabView({
       >
         {TAB_CONFIG.map((tab) => {
           const isActive = activeTab === tab.id;
-          const isDone =
-            tab.id !== "competitive" && !!tabs[tab.id as TabName];
+          const isDone = tab.id !== "competitive" && !!tabs[tab.id as TabName];
           const isRunning = currentSection === tab.id;
+          const isBeingRefreshed = refreshingSection === tab.id;
 
           return (
             <button
@@ -551,7 +794,6 @@ export default function TabView({
                 cursor: "pointer",
                 transition: "all 0.12s",
                 whiteSpace: "nowrap",
-                position: "relative",
               }}
               onMouseEnter={(e) => {
                 if (!isActive) e.currentTarget.style.color = "#9090b8";
@@ -564,7 +806,7 @@ export default function TabView({
                 {tab.icon}
               </span>
               {tab.label}
-              {isRunning && (
+              {(isRunning || isBeingRefreshed) && (
                 <span
                   style={{
                     width: 5,
@@ -576,7 +818,7 @@ export default function TabView({
                   }}
                 />
               )}
-              {isDone && !isRunning && (
+              {isDone && !isRunning && !isBeingRefreshed && (
                 <span
                   style={{
                     width: 5,
@@ -601,6 +843,10 @@ export default function TabView({
         isStreaming={isStreaming}
         statusMessage={statusMessage}
         company={company}
+        meta={meta}
+        refreshingSection={refreshingSection}
+        refreshStreamText={refreshStreamText}
+        onRefresh={handleRefresh}
       />
 
       <style>{`

@@ -7,7 +7,7 @@ import {
   formatFinancialSummary,
   getCompanyInfo,
 } from "@/lib/edgar";
-import { CompanyInfo, TabName } from "@/types";
+import { CompanyInfo, TabName, AnalysisMeta } from "@/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300; // 5 minute timeout for Vercel
@@ -246,9 +246,10 @@ async function streamSection(
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
-  const body = (await request.json()) as CompanyInfo & { quarters?: number };
+  const body = (await request.json()) as CompanyInfo & { quarters?: number; section?: TabName };
   const { cik, name, ticker } = body;
   const quarters = Math.min(Math.max(body.quarters ?? 4, 2), 8);
+  const sectionOnly = body.section ?? null; // if set, only run that one section
 
   if (!cik || !name) {
     return new Response(
@@ -304,30 +305,51 @@ export async function POST(request: NextRequest) {
           releases.length > 0 ||
           financialTable !== "Financial data not available for this company.";
 
+        // Emit metadata so the client can show which periods were analyzed
+        const metaPayload: AnalysisMeta = {
+          transcripts: transcripts.map((r) => ({
+            date: r.date,
+            period: r.period,
+            form: r.form,
+            isTranscript: r.isTranscript ?? false,
+          })),
+          releases: releases.map((r) => ({
+            date: r.date,
+            period: r.period,
+            form: r.form,
+          })),
+        };
+        send({ type: "meta", meta: metaPayload });
+
         send({
           type: "status",
           message: `Found ${transcripts.length} transcript(s), ${releases.length} filing(s). Running analysis…`,
         });
 
-        // ── Section 1: Earnings Calls Analysis ──
-        send({ type: "status", message: "Analyzing earnings calls…" });
         const earningsPrompt = buildEarningsPrompt(company, transcripts, releases);
-        await streamSection("earnings", earningsPrompt, send);
-
-        // ── Section 2: Financial Filing Analysis ──
-        send({ type: "status", message: "Analyzing financial filings…" });
-        const financialsPrompt = buildFinancialsPrompt(
-          company,
-          releases,
-          financialTable,
-          hasFinancialData
-        );
-        await streamSection("financials", financialsPrompt, send);
-
-        // ── Section 3: Theme Tracker ──
-        send({ type: "status", message: "Tracking themes across periods…" });
+        const financialsPrompt = buildFinancialsPrompt(company, releases, financialTable, hasFinancialData);
         const themesPrompt = buildThemesPrompt(company, transcripts, releases);
-        await streamSection("themes", themesPrompt, send);
+
+        if (sectionOnly === "earnings") {
+          send({ type: "status", message: "Refreshing earnings calls analysis…" });
+          await streamSection("earnings", earningsPrompt, send);
+        } else if (sectionOnly === "financials") {
+          send({ type: "status", message: "Refreshing financial filing analysis…" });
+          await streamSection("financials", financialsPrompt, send);
+        } else if (sectionOnly === "themes") {
+          send({ type: "status", message: "Refreshing theme tracker…" });
+          await streamSection("themes", themesPrompt, send);
+        } else {
+          // Full analysis — all three sections
+          send({ type: "status", message: "Analyzing earnings calls…" });
+          await streamSection("earnings", earningsPrompt, send);
+
+          send({ type: "status", message: "Analyzing financial filings…" });
+          await streamSection("financials", financialsPrompt, send);
+
+          send({ type: "status", message: "Tracking themes across periods…" });
+          await streamSection("themes", themesPrompt, send);
+        }
 
         send({ type: "done" });
       } catch (error) {

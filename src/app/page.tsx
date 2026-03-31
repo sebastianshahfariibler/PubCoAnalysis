@@ -5,7 +5,7 @@ import Sidebar from "@/components/Sidebar";
 import SearchBar from "@/components/SearchBar";
 import QuarterSelector from "@/components/QuarterSelector";
 import TabView from "@/components/TabView";
-import { AnalysisRecord, AnalysisTabs, CompanyInfo, TabName } from "@/types";
+import { AnalysisRecord, AnalysisMeta, AnalysisTabs, CompanyInfo, TabName } from "@/types";
 
 // localStorage helpers (safe for SSR)
 function loadHistory(): AnalysisRecord[] {
@@ -97,6 +97,7 @@ export default function Home() {
         let currentSection: TabName | null = null;
         let sectionText = "";
         const completedTabs: Partial<AnalysisTabs> = {};
+        let latestMeta: AnalysisMeta | undefined;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -114,9 +115,12 @@ export default function Home() {
                 content?: string;
                 message?: string;
                 section?: TabName;
+                meta?: AnalysisMeta;
               };
 
-              if (event.type === "status" && event.message) {
+              if (event.type === "meta" && event.meta) {
+                latestMeta = event.meta as AnalysisMeta;
+              } else if (event.type === "status" && event.message) {
                 setMode((prev) =>
                   prev.kind === "analyzing"
                     ? { ...prev, statusMsg: event.message! }
@@ -159,6 +163,7 @@ export default function Home() {
                     financials: completedTabs.financials ?? "",
                     themes: completedTabs.themes ?? "",
                   },
+                  meta: latestMeta,
                 };
                 setHistory((prev) => {
                   const updated = [record, ...prev];
@@ -187,6 +192,23 @@ export default function Home() {
     },
     [quarters]
   );
+
+  function handleSectionRefreshed(section: TabName, text: string, meta: AnalysisMeta) {
+    setMode((prev) => {
+      if (prev.kind !== "viewing") return prev;
+      const updatedRecord: AnalysisRecord = {
+        ...prev.record,
+        tabs: { ...prev.record.tabs, [section]: text },
+        meta,
+      };
+      setHistory((h) => {
+        const updated = h.map((r) => (r.id === updatedRecord.id ? updatedRecord : r));
+        saveHistory(updated);
+        return updated;
+      });
+      return { kind: "viewing", record: updatedRecord };
+    });
+  }
 
   function handleSelectRecord(record: AnalysisRecord) {
     setMode({ kind: "viewing", record });
@@ -404,6 +426,8 @@ export default function Home() {
                   streamingText=""
                   isStreaming={false}
                   quarters={mode.record.quarters}
+                  meta={mode.record.meta}
+                  onSectionRefreshed={handleSectionRefreshed}
                 />
               )}
             </>
