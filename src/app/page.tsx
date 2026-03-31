@@ -337,9 +337,12 @@ export default function Home() {
                 statusMessage={statusMsg}
               />
 
-              {/* Competitor analysis button — only after streaming is done */}
+              {/* Competitor analysis — keyed by CIK so state resets on tab switch */}
               {mode.kind === "viewing" && (
-                <CompetitorPanel company={mode.record.company} />
+                <CompetitorPanel
+                  key={mode.record.company.cik}
+                  company={mode.record.company}
+                />
               )}
             </>
           )}

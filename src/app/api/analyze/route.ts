@@ -18,87 +18,69 @@ const anthropic = new Anthropic({
 function buildPrompt(
   company: CompanyInfo & { sic?: string; sicDescription?: string },
   releases: Awaited<ReturnType<typeof getEarningsReleases>>,
-  financialTable: string
+  financialTable: string,
+  hasData: boolean
 ): string {
+  if (!hasData) {
+    return `The user requested an earnings analysis for ${company.name} (${company.ticker}), but no filings or financial data could be retrieved from the U.S. Securities and Exchange Commission (SEC) EDGAR database for this company. Please respond with exactly: "No data found for ${company.name} (${company.ticker}) in SEC EDGAR. This may be a non-US listed company or the data may not be available."`;
+  }
+
   const releaseSections = releases
     .map(
       (r, i) =>
-        `### Filing ${i + 1}: ${r.form} — Period: ${r.period} | Filed: ${r.date}\n\n${r.text.slice(0, 10000)}\n`
+        `### Filing ${i + 1}: ${r.form} — Period: ${r.period} | Filed: ${r.date}\n\n${r.text.slice(0, 8000)}\n`
     )
     .join("\n---\n\n");
 
-  const noReleases =
-    releases.length === 0
-      ? "No earnings press releases found in EDGAR for this company."
-      : "";
+  return `You are a senior equity analyst. Write a concise but rigorous report on ${company.name} (${company.ticker}).
 
-  return `You are a senior equity research analyst preparing a comprehensive strategic assessment report.
+**Style rules:**
+- Total response: 500–750 words maximum
+- Spell out every acronym in full the first time it appears, e.g. "Earnings Per Share (EPS)"
+- No filler phrases ("it is worth noting", "in conclusion", etc.)
+- Only reference data that actually appears in the filings below — do not speculate or fill gaps
+- If a section has insufficient data, write "Insufficient data" for that section only
 
-## COMPANY: ${company.name} (${company.ticker}) | CIK: ${company.cik}
-Industry: ${company.sicDescription ?? "N/A"} (SIC: ${company.sic ?? "N/A"})
+## COMPANY: ${company.name} (${company.ticker})
+Industry: ${company.sicDescription ?? "N/A"} (Standard Industrial Classification (SIC): ${company.sic ?? "N/A"})
 
 ---
 
-## SECTION A: EARNINGS RELEASES & FILINGS (Last ${releases.length} Periods)
-${noReleases}
+## FILINGS (${releases.length} periods)
+
 ${releaseSections}
 
 ---
 
-## SECTION B: FINANCIAL PERFORMANCE SUMMARY
+## FINANCIAL SUMMARY
 
 ${financialTable}
 
 ---
 
-## YOUR ANALYSIS ASSIGNMENT
+## REPORT STRUCTURE
 
-Please provide a rigorous, specific analysis covering the following four sections. Be analytical, cite specific numbers, and reference actual language from the filings above.
-
-### 1. EARNINGS TONE & SENTIMENT ANALYSIS
-
-For each filing period above:
-- Rate management tone: **Confident / Cautious / Defensive / Mixed**
-- Identify the 2-3 dominant themes/priorities emphasized
-- Note key linguistic patterns: hedging language, forward-looking qualifiers, emphasis shifts vs. prior periods
-- Flag any notable changes in tone from period to period
-- Quote specific language where it reveals intent or confidence
+### 1. TONE SNAPSHOT
+One sentence per filing period. Format: **[Period] — [Confident/Cautious/Defensive/Mixed]:** key theme + one direct quote if available.
 
 ### 2. STRATEGIC HYPOTHESIS
+3–5 bullet points. What is management betting on over the next 2–3 years? Reference specific initiatives, markets, or capital allocation signals from the filings.
 
-Based on patterns across all filings and financial data:
-- What is management's apparent 2-3 year strategic direction?
-- What are the key strategic bets (products, markets, capabilities)?
-- How does capital allocation (cash position, debt, investments implied by opex trends) signal priorities?
-- What competitive positioning is management signaling?
-- What is the company **not** talking about that may be significant?
+### 3. PROMISES VS. ACTUALS
+For each period that has a subsequent period to compare against, list guidance given then show what happened:
+- ✅ **MET:** [promise] → [actual]
+- ⚠️ **MISSED:** [promise] → [actual] [¹]
 
-### 3. PROMISES VS. ACTUALS — DISCREPANCY ANALYSIS
+Footnotes at end of section:
+> [¹] "exact quote" — [Filing date]
 
-For each period with a subsequent period to compare against:
-- List specific forward guidance, targets, or promises made in the filing
-- State what the following period's data actually showed
-- For each discrepancy, use this format:
+If no comparable periods exist, write "Insufficient data for comparison."
 
-  ⚠️ **DISCREPANCY:** "[What was promised]" → Actual: [what happened] [¹]
-
-Where [¹] is a footnote. Compile all footnotes at the end of this section as:
-> [¹] Exact quote: "..." — [Filing date / period]
-
-If guidance was met or exceeded, note: ✅ **MET:** [promise] → [actual result]
-
-### 4. EXECUTION CAPABILITY ASSESSMENT
-
-- **Overall Execution Grade:** A / B+ / B / C+ / C / D (with brief justification)
-- **Management Credibility Score:** X/10 — based on guidance accuracy track record
-- **Guidance Reliability:** How consistently does management's guidance prove accurate?
-- **Execution Strengths:** 2-3 specific areas where management consistently delivers
-- **Execution Risks:** 2-3 specific concerns about execution gaps or credibility
-- **Strategic Capability vs. Ambition:** Is the organization demonstrating the capability to execute its stated strategy?
-
----
-
-Format your response with clear markdown headers (##, ###). Use **bold** for key findings. Be specific and quantitative wherever possible. A high-quality response will reference actual numbers and quotes from the filings above.`;
+### 4. EXECUTION ASSESSMENT
+- **Grade:** A/B/C/D with one-sentence rationale
+- **Management Credibility:** X/10
+- **Key strength:** one line
+- **Key risk:** one line`;
 }
 
 export async function POST(request: NextRequest) {
@@ -154,17 +136,23 @@ export async function POST(request: NextRequest) {
           sicDescription: meta?.sicDescription,
         };
 
+        const hasData =
+          releases.length > 0 ||
+          financialTable !== "Financial data not available for this company.";
+
         send({
           type: "status",
-          message: `Found ${releases.length} filings. Running AI analysis…`,
+          message: hasData
+            ? `Found ${releases.length} filing(s). Running AI analysis…`
+            : "No filings found. Returning no-data response…",
         });
 
-        const prompt = buildPrompt(company, releases, financialTable);
+        const prompt = buildPrompt(company, releases, financialTable, hasData);
 
         // Stream Claude response
         const claudeStream = await anthropic.messages.stream({
           model: "claude-opus-4-6",
-          max_tokens: 8000,
+          max_tokens: 4000,
           thinking: { type: "adaptive" },
           messages: [{ role: "user", content: prompt }],
         });

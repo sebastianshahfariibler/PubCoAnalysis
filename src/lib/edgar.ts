@@ -134,29 +134,23 @@ async function fetchDocument(
 
 // ── Earnings Releases ─────────────────────────────────────────────────────────
 
-export async function getEarningsReleases(
-  cik: string
+async function collectFilings(
+  cik: string,
+  recent: Submissions["filings"]["recent"],
+  predicate: (form: string, items: string) => boolean,
+  limit: number,
+  existing: EarningsRelease[]
 ): Promise<EarningsRelease[]> {
-  const subs = await getSubmissions(cik);
-  const { recent } = subs.filings;
-  const results: EarningsRelease[] = [];
-
-  for (let i = 0; i < recent.form.length && results.length < 4; i++) {
+  const results: EarningsRelease[] = [...existing];
+  for (let i = 0; i < recent.form.length && results.length < limit; i++) {
     const form = recent.form[i];
     const items = recent.items[i] ?? "";
-
-    // 8-K with item 2.02 = Results of Operations (earnings press releases)
-    // Also grab 8-K/A amendments and 10-Q/10-K with earnings data
-    const isEarnings8K =
-      (form === "8-K" || form === "8-K/A") && items.includes("2.02");
-    const is10Q = form === "10-Q";
-
-    if (!isEarnings8K && !is10Q) continue;
-
+    if (!predicate(form, items)) continue;
     const accNo = recent.accessionNumber[i];
     const primaryDoc = recent.primaryDocument[i];
     if (!primaryDoc) continue;
-
+    // Skip duplicates by accession number
+    if (results.some((r) => r.date === recent.filingDate[i] && r.form === form)) continue;
     try {
       const text = await fetchDocument(cik, accNo, primaryDoc);
       if (text.length > 200) {
@@ -167,13 +161,58 @@ export async function getEarningsReleases(
           text,
         });
       }
-      await sleep(150); // Respect EDGAR rate limits (10 req/sec)
+      await sleep(150);
     } catch {
-      // Skip failed documents
+      // skip
     }
   }
-
   return results;
+}
+
+export async function getEarningsReleases(
+  cik: string
+): Promise<EarningsRelease[]> {
+  const subs = await getSubmissions(cik);
+  const { recent } = subs.filings;
+
+  // Pass 1: 8-K / 8-K/A with item 2.02 (Results of Operations — best source)
+  let results = await collectFilings(
+    cik, recent,
+    (form, items) => (form === "8-K" || form === "8-K/A") && items.includes("2.02"),
+    4, []
+  );
+
+  // Pass 2: 8-K / 8-K/A with item 7.01 (Regulation FD — transcripts & supplemental)
+  if (results.length < 4) {
+    results = await collectFilings(
+      cik, recent,
+      (form, items) => (form === "8-K" || form === "8-K/A") && items.includes("7.01"),
+      4, results
+    );
+  }
+
+  // Pass 3: 10-Q (quarterly reports with full MD&A)
+  if (results.length < 4) {
+    results = await collectFilings(
+      cik, recent,
+      (form) => form === "10-Q",
+      4, results
+    );
+  }
+
+  // Pass 4: 10-K (annual reports) if still under 4
+  if (results.length < 4) {
+    results = await collectFilings(
+      cik, recent,
+      (form) => form === "10-K" || form === "10-K/A",
+      4, results
+    );
+  }
+
+  // Sort by date descending, cap at 4
+  return results
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 4);
 }
 
 // ── Financial Summary ─────────────────────────────────────────────────────────
